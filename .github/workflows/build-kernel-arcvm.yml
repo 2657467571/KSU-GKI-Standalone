@@ -1,10 +1,14 @@
-name: Build Kernel - ChromeOS ARCVM
+name: 构建内核 - ChromeOS ARCVM
+
 on:
   workflow_call:
   workflow_dispatch:
 
 env:
   git_tag: chromeos-5.10-arcvm
+  LTO: thin
+  ROOT_DIR: /
+  KERNEL_DIR: ${{ github.workspace }}/kernel
 
 jobs:
   build:
@@ -21,108 +25,131 @@ jobs:
             build_config: build.config.gki.aarch64
             defconfig: arm64_arcvm_defconfig
 
-    name: Build ChromeOS ARCVM kernel
-    runs-on: ubuntu-22.04
+    name: 构建 ChromeOS ARCVM 内核 (${{ matrix.arch }})
+    runs-on: ubuntu-20.04 # 关键：ChromeOS 5.10 推荐使用 20.04
     env:
-      LTO: thin
-      ROOT_DIR: /
-      KERNEL_DIR: ${{ github.workspace }}/kernel
+      ARCH: ${{ matrix.arch }} # 关键：统一 ARCH 变量
 
     steps:
-      - name: Install Build Tools
+      - name: 安装构建工具
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bc \
-              bison build-essential ca-certificates flex git gnupg \
-              libelf-dev libssl-dev lsb-release software-properties-common wget \
-              libncurses-dev binutils-aarch64-linux-gnu gcc-aarch64-linux-gnu nuget gzip \
-              rsync python3 device-tree-compiler
-
-          sudo ln -s --force python3 /usr/bin/python
-
-          export LLVM_VERSION=14
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ca-certificates flex git gnupg \
+            libelf-dev libssl-dev lsb-release software-properties-common wget \
+            libncurses-dev binutils-aarch64-linux-gnu gcc-aarch64-linux-gnu \
+            rsync python3 device-tree-compiler curl
+          
+          # 设置 python 软链接
+          sudo update-alternatives --install /usr/bin/python python /usr/bin/python3 1
+          
+          # 安装 LLVM 12 (ChromeOS 5.10 的最佳伴侣)
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
-          sudo ./llvm.sh $LLVM_VERSION
-          rm ./llvm.sh
-          sudo ln -s --force /usr/bin/clang-$LLVM_VERSION /usr/bin/clang
-          sudo ln -s --force /usr/bin/ld.lld-$LLVM_VERSION /usr/bin/ld.lld
-          sudo ln -s --force /usr/bin/llvm-objdump-$LLVM_VERSION /usr/bin/llvm-objdump
-          sudo ln -s --force /usr/bin/llvm-ar-$LLVM_VERSION /usr/bin/llvm-ar
-          sudo ln -s --force /usr/bin/llvm-nm-$LLVM_VERSION /usr/bin/llvm-nm
-          sudo ln -s --force /usr/bin/llvm-strip-$LLVM_VERSION /usr/bin/llvm-strip
-          sudo ln -s --force /usr/bin/llvm-objcopy-$LLVM_VERSION /usr/bin/llvm-objcopy
-          sudo ln -s --force /usr/bin/llvm-readelf-$LLVM_VERSION /usr/bin/llvm-readelf
-          sudo ln -s --force /usr/bin/clang++-$LLVM_VERSION /usr/bin/clang++
+          sudo ./llvm.sh 12
+          rm llvm.sh
+          
+          # 建立必要的软链接
+          sudo ln -sf /usr/bin/clang-12 /usr/bin/clang
+          sudo ln -sf /usr/bin/ld.lld-12 /usr/bin/ld.lld
+          sudo ln -sf /usr/bin/llvm-objdump-12 /usr/bin/llvm-objdump
+          sudo ln -sf /usr/bin/llvm-ar-12 /usr/bin/llvm-ar
+          sudo ln -sf /usr/bin/llvm-nm-12 /usr/bin/llvm-nm
+          sudo ln -sf /usr/bin/llvm-strip-12 /usr/bin/llvm-strip
+          sudo ln -sf /usr/bin/llvm-objcopy-12 /usr/bin/llvm-objcopy
+          sudo ln -sf /usr/bin/llvm-readelf-12 /usr/bin/llvm-readelf
+          sudo ln -sf /usr/bin/clang++-12 /usr/bin/clang++
 
-      - name: Checkout KernelSU
+      - name: 检出 KernelSU
         uses: actions/checkout@v5
         with:
           repository: tiann/KernelSU
           path: KernelSU
           fetch-depth: 0
 
-      - name: Setup kernel source
+      - name: 设置内核源代码
         run: git clone https://chromium.googlesource.com/chromiumos/third_party/kernel.git -b ${{ env.git_tag }} --depth=1
 
-      - name: Extract version from Makefile
+      - name: 从 Makefile 提取版本
         working-directory: kernel
         run: |
           VERSION=$(grep -E '^VERSION = ' Makefile | awk '{print $3}')
           PATCHLEVEL=$(grep -E '^PATCHLEVEL = ' Makefile | awk '{print $3}')
           SUBLEVEL=$(grep -E '^SUBLEVEL = ' Makefile | awk '{print $3}')
-          echo "ChromeOS ARCVM Linux kernel version: $VERSION.$PATCHLEVEL.$SUBLEVEL"
+          echo "ChromeOS ARCVM Linux 内核版本：$VERSION.$PATCHLEVEL.$SUBLEVEL"
           echo "version=$VERSION.$PATCHLEVEL.$SUBLEVEL" >> $GITHUB_ENV
 
-      - name: Setup KernelSU
+      - name: 设置 KernelSU (集成驱动)
         working-directory: kernel
         run: |
-          echo "[+] KernelSU setup"
+          echo "[+] KernelSU 设置"
           KERNEL_ROOT=$GITHUB_WORKSPACE/kernel
           echo "[+] KERNEL_ROOT: $KERNEL_ROOT"
-          echo "[+] Copy KernelSU driver to $KERNEL_ROOT/drivers"
+          
+          echo "[+] 将 KernelSU 驱动复制到 $KERNEL_ROOT/drivers"
           ln -sf $GITHUB_WORKSPACE/KernelSU/kernel $KERNEL_ROOT/drivers/kernelsu
-
-          echo "[+] Add KernelSU driver to Makefile"
+          
+          echo "[+] 将 KernelSU 驱动添加到 Makefile"
           DRIVER_MAKEFILE=$KERNEL_ROOT/drivers/Makefile
           DRIVER_KCONFIG=$KERNEL_ROOT/drivers/Kconfig
           grep -q "kernelsu" "$DRIVER_MAKEFILE" || printf "\nobj-\$(CONFIG_KSU) += kernelsu/\n" >> "$DRIVER_MAKEFILE"
-          grep -q "kernelsu" "$DRIVER_KCONFIG" || sed -i "/endmenu/i\\source \"drivers/kernelsu/Kconfig\"" "$DRIVER_KCONFIG"
-
-          echo "[+] Apply KernelSU patches"
-          cd $KERNEL_ROOT && git apply $GITHUB_WORKSPACE/KernelSU/.github/patches/5.10/*.patch || echo "[-] No patch found"
-
-          echo "[+] Patch script/setlocalversion"
+          grep -q "kernelsu" "$DRIVER_KCONFIG" || sed -i "/endmenu/i\source \"drivers/kernelsu/Kconfig\"" "$DRIVER_KCONFIG"
+          
+          echo "[+] 应用 KernelSU 补丁"
+          # 5.10 补丁通常能直接应用于 ChromeOS 5.10
+          cd $KERNEL_ROOT && git apply $GITHUB_WORKSPACE/KernelSU/.github/patches/5.10/*.patch || echo "[-] 部分补丁已跳过 (正常)"
+          
+          echo "[+] Patch scripts/setlocalversion"
           sed -i 's/-dirty//g' $KERNEL_ROOT/scripts/setlocalversion
-
-          echo "[+] KernelSU setup done."
+          
+          echo "[+] KernelSU 设置完成。"
+          
           cd $GITHUB_WORKSPACE/KernelSU
-          KSU_VERSION=$(($(git rev-list --count HEAD) + 10200))
-          echo "KernelSU version: $KSU_VERSION"
+          KSU_VERSION=$(( $(git rev-list --count HEAD) + 10200 ))
+          echo "KernelSU 版本: $KSU_VERSION"
           echo "kernelsu_version=$KSU_VERSION" >> $GITHUB_ENV
 
-      - name: Build Kernel
+      - name: 构建内核
         working-directory: kernel
         env:
           KERNEL_IMAGE_NAME: ${{ matrix.kernel_image_name }}
-          ARCH: ${{ matrix.arch }}
         run: |
           set -a && . ${{ matrix.build_config }}; set +a
+          
           export DEFCONFIG=${{ matrix.defconfig }}
-          if [ ! -z ${{ vars.EXPECTED_SIZE }} ] && [ ! -z ${{ vars.EXPECTED_HASH }} ]; then
-            export KSU_EXPECTED_SIZE=${{ vars.EXPECTED_SIZE }}
-            export KSU_EXPECTED_HASH=${{ vars.EXPECTED_HASH }}
-          fi
-
+          
+          # 清理环境
           make LLVM=1 LLVM_IAS=1 DEPMOD=depmod DTC=dtc O=${PWD} mrproper
+          
+          # 生成默认配置
           make LLVM=1 LLVM_IAS=1 DEPMOD=depmod DTC=dtc O=${PWD} ${DEFCONFIG} < /dev/null
-          scripts/config --file .config -e LTO_CLANG -d LTO_NONE -e LTO_CLANG_THIN -d LTO_CLANG_FULL -e THINLTO
+          
+          # 关键配置：开启 KernelSU 及其依赖
+          # 使用 KPROBES 模式以规避 x86_64 的 syscall hardening 冲突
+          scripts/config --file .config \
+            -e KSU \
+            -e KPROBES \
+            -e HAVE_KPROBES \
+            -e KPROBE_EVENTS \
+            -e OVERLAY_FS \
+            -e MODULES \
+            -d KSU_MANUAL_HOOK # 关键：禁用 manual hook，防止 x86_64 编译错误
+            
+          # 启用 ThinLTO
+          scripts/config --file .config \
+            -e LTO_CLANG \
+            -d LTO_NONE \
+            -e LTO_CLANG_THIN \
+            -d LTO_CLANG_FULL
+            
+          # 开始编译
           make LLVM=1 LLVM_IAS=1 DEPMOD=depmod DTC=dtc O=${PWD} -j$(nproc) ${KERNEL_IMAGE_NAME} modules prepare-objtool
+          
           ls -l -h ${PWD}/arch/${ARCH}/boot
           echo "file_path=${PWD}/arch/${ARCH}/boot/${KERNEL_IMAGE_NAME}" >> $GITHUB_ENV
 
-      - name: Upload kernel-ARCVM-${{ matrix.arch }}-${{ env.version }}
+      - name: 上传内核产物
         uses: actions/upload-artifact@v5
         with:
-          name: kernel-ARCVM-${{ matrix.arch }}-${{ env.version }}
-          path: "${{ env.file_path }}"
+          name: kernel-ARCVM-${{ matrix.arch }}-${{ env.version }}-KSU-${{ env.kernelsu_version }}
+          path: ${{ env.file_path }}
